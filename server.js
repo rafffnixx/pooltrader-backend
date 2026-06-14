@@ -11,18 +11,20 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Trust proxy for Render (required for rate limiting behind proxy)
+// Trust proxy for Render
 app.set('trust proxy', 1);
 
-// Allowed origins for CORS
+// Allowed origins for CORS - UPDATED with Vercel URL
 const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:3002',
+    'https://pooltrader.vercel.app',  // Add your Vercel frontend URL
+    'https://pooltrader-git-main-rafffnixxs-projects.vercel.app', // Vercel preview URL
     process.env.CLIENT_URL
 ].filter(Boolean);
 
-// CORS configuration
+// CORS configuration - FIXED
 app.use(cors({
     origin: function(origin, callback) {
         // Allow requests with no origin (like mobile apps or curl)
@@ -30,12 +32,15 @@ app.use(cors({
         if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
             return callback(null, true);
         } else {
+            console.log('Blocked origin:', origin);
             const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
             return callback(new Error(msg), false);
         }
     },
     credentials: true,
-    optionsSuccessStatus: 200
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Security middleware
@@ -45,16 +50,14 @@ app.use(helmet({
 
 // Rate limiting
 const limiter = rateLimit({
-    windowMs: 60 * 1000, // 1 minute window
-    max: 500, // Allow 500 requests per minute
+    windowMs: 60 * 1000,
+    max: 500,
     message: 'Too many requests from this IP, please try again later.',
     skipSuccessfulRequests: false,
 });
 
-// Apply rate limiters to specific routes
-app.use('/api/auth/', limiter); // Stricter limit for auth
-app.use('/api/admin/', limiter); // Stricter limit for admin
-// Public routes have no rate limit
+app.use('/api/auth/', limiter);
+app.use('/api/admin/', limiter);
 
 // Body parsing
 app.use(express.json());
@@ -90,7 +93,7 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         environment: process.env.NODE_ENV,
-        database: 'Connected to PostgreSQL'
+        cors: 'Enabled'
     });
 });
 
@@ -138,6 +141,7 @@ const server = app.listen(PORT, () => {
     console.log(`🏥 Health: http://localhost:${PORT}/api/health`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`📅 Started: ${new Date().toISOString()}\n`);
+    console.log(`🔗 CORS Allowed Origins:`, allowedOrigins);
 });
 
 // Graceful shutdown
