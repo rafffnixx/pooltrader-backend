@@ -2,10 +2,9 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
-const pool = require('../../database/pool');
+const pool = require('../database/pool');
 const { authMiddleware } = require('../middleware/auth.middleware');
-const emailService = require('../services/email.service');
-
+const emailService = require('../services/email.service');  // This should be correct
 const router = express.Router();
 
 // Validation rules
