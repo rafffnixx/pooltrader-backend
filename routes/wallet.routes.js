@@ -1,6 +1,7 @@
 const express = require('express');
-const pool = require('../database/pool');
+const pool = require('../../database/pool');
 const { authMiddleware } = require('../middleware/auth.middleware');
+const emailService = require('../services/email.service');
 
 const router = express.Router();
 
@@ -9,13 +10,11 @@ router.get('/balance', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     
     try {
-        // Get user total balance
         const userResult = await pool.query(
             'SELECT current_balance as total FROM users WHERE id = $1',
             [userId]
         );
         
-        // Get allocated funds (invested in active pools)
         const allocatedResult = await pool.query(`
             SELECT COALESCE(SUM(c.amount), 0) as allocated
             FROM contributions c
@@ -27,14 +26,12 @@ router.get('/balance', authMiddleware, async (req, res) => {
             AND p.end_date >= CURRENT_TIMESTAMP
         `, [userId]);
         
-        // Get pending deposits
         const pendingDeposits = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total
             FROM transactions 
             WHERE user_id = $1 AND type = 'deposit' AND status = 'pending'
         `, [userId]);
         
-        // Get pending withdrawals
         const pendingWithdrawals = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total
             FROM withdrawal_requests 
@@ -114,6 +111,22 @@ router.post('/deposit-request', authMiddleware, async (req, res) => {
             RETURNING *
         `, [userId, amount, payment_method, payment_details || null]);
         
+        // Get user email for notification
+        const userResult = await pool.query(
+            'SELECT email, full_name FROM users WHERE id = $1',
+            [userId]
+        );
+        
+        // Send deposit request confirmation email
+        if (userResult.rows.length > 0) {
+            await emailService.sendEmail(userResult.rows[0].email, 'deposit_request', {
+                name: userResult.rows[0].full_name.split(' ')[0],
+                amount: amount,
+                paymentMethod: payment_method,
+                transactionId: result.rows[0].id
+            });
+        }
+        
         res.json({ 
             success: true, 
             message: 'Deposit request submitted. Awaiting admin confirmation.',
@@ -135,8 +148,7 @@ router.post('/withdraw-request', authMiddleware, async (req, res) => {
     }
     
     try {
-        // Check if user has sufficient withdrawable balance
-        const userResult = await pool.query('SELECT current_balance as total FROM users WHERE id = $1', [userId]);
+        const userResult = await pool.query('SELECT current_balance as total, email, full_name FROM users WHERE id = $1', [userId]);
         
         const allocatedResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as allocated
@@ -165,6 +177,16 @@ router.post('/withdraw-request', authMiddleware, async (req, res) => {
             RETURNING *
         `, [userId, amount, payment_method, payment_details || null]);
         
+        // Send withdrawal request confirmation email
+        if (userResult.rows.length > 0) {
+            await emailService.sendEmail(userResult.rows[0].email, 'withdrawal_request', {
+                name: userResult.rows[0].full_name.split(' ')[0],
+                amount: amount,
+                paymentMethod: payment_method,
+                withdrawalId: result.rows[0].id
+            });
+        }
+        
         res.json({ 
             success: true, 
             message: 'Withdrawal request submitted. Admin will process it shortly.',
@@ -177,7 +199,6 @@ router.post('/withdraw-request', authMiddleware, async (req, res) => {
 });
 
 // Allocate funds from wallet to pool
-// Allocate funds from wallet to pool
 router.post('/allocate-to-pool', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     const { pool_id, amount } = req.body;
@@ -186,7 +207,6 @@ router.post('/allocate-to-pool', authMiddleware, async (req, res) => {
     try {
         await client.query('BEGIN');
         
-        // Get pool details
         const poolResult = await client.query(
             'SELECT * FROM pools WHERE id = $1 AND status = $2',
             [pool_id, 'open']
@@ -198,11 +218,9 @@ router.post('/allocate-to-pool', authMiddleware, async (req, res) => {
         
         const pool = poolResult.rows[0];
         
-        // Check if user has sufficient balance
-        const userResult = await client.query('SELECT current_balance FROM users WHERE id = $1', [userId]);
+        const userResult = await client.query('SELECT current_balance, email, full_name FROM users WHERE id = $1', [userId]);
         const currentBalance = parseFloat(userResult.rows[0].current_balance);
         
-        // Get already allocated funds
         const allocatedResult = await client.query(`
             SELECT COALESCE(SUM(amount), 0) as allocated
             FROM contributions
@@ -216,26 +234,34 @@ router.post('/allocate-to-pool', authMiddleware, async (req, res) => {
             throw new Error(`Insufficient withdrawable balance. Available: $${withdrawable.toLocaleString()}`);
         }
         
-        // Calculate new share percentage
         const newTotal = parseFloat(pool.current_total) + amount;
         const percentageShare = (amount / newTotal) * 100;
         
-        // Create contribution
         await client.query(`
             INSERT INTO contributions (user_id, pool_id, amount, percentage_share, status, allocated_from_wallet)
             VALUES ($1, $2, $3, $4, 'confirmed', true)
         `, [userId, pool_id, amount, percentageShare]);
         
-        // Update pool total
         await client.query('UPDATE pools SET current_total = $1 WHERE id = $2', [newTotal, pool_id]);
         
-        // Record transaction
         await client.query(`
             INSERT INTO transactions (user_id, type, amount, status, payment_method)
             VALUES ($1, 'allocation', $2, 'completed', 'wallet')
         `, [userId, amount]);
         
         await client.query('COMMIT');
+        
+        // Send allocation confirmation email
+        if (userResult.rows.length > 0) {
+            await emailService.sendEmail(userResult.rows[0].email, 'allocation_confirmed', {
+                name: userResult.rows[0].full_name.split(' ')[0],
+                amount: amount,
+                poolName: pool.name,
+                poolId: pool_id,
+                newBalance: currentBalance - amount,
+                dashboardUrl: process.env.CLIENT_URL || 'https://pooltrader.vercel.app/dashboard'
+            });
+        }
         
         res.json({ 
             success: true, 
