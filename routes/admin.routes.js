@@ -260,6 +260,118 @@ router.post('/create-pool', authMiddleware, adminMiddleware, async (req, res) =>
     }
 });
 
+// ==================== TRADE MANAGEMENT (ADMIN) ====================
+
+// Get all trades (for admin trades tab)
+router.get('/trades', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT t.*, p.name as pool_name
+            FROM trades t
+            JOIN pools p ON t.pool_id = p.id
+            ORDER BY t.open_time DESC
+            LIMIT 100
+        `);
+        res.json({ success: true, trades: result.rows });
+    } catch (error) {
+        console.error('Error fetching all trades:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Get open positions (all pools)
+router.get('/open-positions', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT t.*, p.name as pool_name
+            FROM trades t
+            JOIN pools p ON t.pool_id = p.id
+            WHERE t.status = 'open'
+            ORDER BY t.open_time DESC
+        `);
+        
+        const positions = result.rows.map(trade => ({
+            ...trade,
+            current_pnl: trade.current_pnl || 0,
+            pnl_percentage: trade.pnl_percentage || 0
+        }));
+        
+        res.json({ success: true, positions });
+    } catch (error) {
+        console.error('Error fetching open positions:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Close a pool and distribute remaining balance
+router.post('/pools/:poolId/close', authMiddleware, adminMiddleware, async (req, res) => {
+    const { poolId } = req.params;
+    const client = await pool.connect();
+    
+    try {
+        await client.query('BEGIN');
+        
+        const poolResult = await client.query('SELECT * FROM pools WHERE id = $1', [poolId]);
+        if (poolResult.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Pool not found' });
+        }
+        
+        const pool = poolResult.rows[0];
+        
+        const contributions = await client.query(`
+            SELECT c.*, u.id as user_id, u.current_balance as user_balance
+            FROM contributions c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.pool_id = $1 AND c.status = 'confirmed'
+        `, [poolId]);
+        
+        if (contributions.rows.length > 0) {
+            const totalPool = parseFloat(pool.current_total);
+            
+            for (const contribution of contributions.rows) {
+                const userShare = parseFloat(contribution.amount) / totalPool;
+                const userPayout = totalPool * userShare;
+                
+                await client.query(`
+                    UPDATE users 
+                    SET current_balance = current_balance + $1
+                    WHERE id = $2
+                `, [userPayout, contribution.user_id]);
+                
+                await client.query(`
+                    INSERT INTO profit_loss_splits (pool_id, user_id, original_contribution, final_balance, profit_share)
+                    VALUES ($1, $2, $3, $4, $5)
+                `, [poolId, contribution.user_id, contribution.amount, userPayout, userPayout - parseFloat(contribution.amount)]);
+            }
+        }
+        
+        await client.query(`
+            UPDATE trades 
+            SET status = 'closed', close_time = CURRENT_TIMESTAMP
+            WHERE pool_id = $1 AND status = 'open'
+        `, [poolId]);
+        
+        await client.query(`
+            UPDATE pools 
+            SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+        `, [poolId]);
+        
+        await client.query('COMMIT');
+        
+        res.json({ 
+            success: true, 
+            message: `Pool "${pool.name}" has been closed and funds distributed to ${contributions.rows.length} investors`
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error closing pool:', error);
+        res.status(500).json({ success: false, message: error.message });
+    } finally {
+        client.release();
+    }
+});
+
 // ==================== DASHBOARD ANALYTICS ====================
 
 // Get dashboard analytics
