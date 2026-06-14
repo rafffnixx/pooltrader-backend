@@ -1,0 +1,20 @@
+{
+  "name": "trading-pool-database",
+  "version": "1.0.0",
+  "description": "Database management for Trading Pool Platform",
+  "main": "pool.js",
+  "scripts": {
+    "migrate": "node migrate.js",
+    "seed": "node seed.js",
+    "backup": "node backup.js",
+    "reset": "node reset.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1",
+    "pg-format": "^1.0.4"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^7.3.0"
+  }
+}
