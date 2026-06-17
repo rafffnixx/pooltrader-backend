@@ -50,8 +50,10 @@ router.get('/pool/:poolId/positions', authMiddleware, adminMiddleware, async (re
     }
 });
 
-// Add new trade - UPDATED with new fields
+// Add new trade - UPDATED with debug logs
 router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
+    console.log('📥 FULL REQUEST BODY:', JSON.stringify(req.body, null, 2));
+    
     const { 
         pool_id, 
         symbol, 
@@ -60,10 +62,13 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
         open_price, 
         stop_loss, 
         take_profit, 
-        entry_amount,    // NEW
+        entry_amount,    // NEW - Entry amount in dollars
         notes,
-        open_time        // NEW - editable time
+        open_time        // NEW - Editable open time
     } = req.body;
+    
+    console.log('📥 entry_amount received:', entry_amount);
+    console.log('📥 entry_amount type:', typeof entry_amount);
     
     try {
         // Use provided open_time or default to current timestamp
@@ -92,10 +97,13 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
             open_price, 
             stop_loss || null, 
             take_profit || null, 
-            entry_amount || null,  // NEW
+            entry_amount || null,  // NEW - note: this is $8
             notes || null,
-            tradeOpenTime          // NEW
+            tradeOpenTime          // NEW - this is $10
         ]);
+        
+        console.log('✅ Trade created with entry_amount:', result.rows[0].entry_amount);
+        console.log('✅ Trade ID:', result.rows[0].id);
         
         res.json({ 
             success: true, 
@@ -103,7 +111,7 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
             trade: result.rows[0]
         });
     } catch (error) {
-        console.error('Add trade error:', error);
+        console.error('❌ Add trade error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -148,16 +156,21 @@ router.put('/trade/:id/price', authMiddleware, adminMiddleware, async (req, res)
     }
 });
 
-// Close trade with profit/loss - UPDATED with new fields
+// Close trade with profit/loss - UPDATED with debug logs
 router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res) => {
+    console.log('📥 CLOSE REQUEST BODY:', JSON.stringify(req.body, null, 2));
+    
     const { id } = req.params;
     const { 
         close_price, 
         closed_reason,
-        exit_amount,     // NEW
-        profit_loss,     // NEW - manual profit/loss
-        close_time       // NEW - editable time
+        exit_amount,     // NEW - Exit amount in dollars
+        profit_loss,     // NEW - Manual profit/loss
+        close_time       // NEW - Editable close time
     } = req.body;
+    
+    console.log('📥 exit_amount received:', exit_amount);
+    console.log('📥 profit_loss received:', profit_loss);
     
     try {
         const tradeResult = await pool.query('SELECT * FROM trades WHERE id = $1', [id]);
@@ -176,12 +189,15 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
             } else {
                 finalProfitLoss = (parseFloat(trade.open_price) - close_price) * parseFloat(trade.volume);
             }
+            console.log('📊 Auto-calculated profit_loss:', finalProfitLoss);
+        } else {
+            console.log('📊 Using manual profit_loss:', finalProfitLoss);
         }
         
         // Use provided close_time or default to current timestamp
         const tradeCloseTime = close_time || new Date().toISOString();
         
-        await pool.query(`
+        const result = await pool.query(`
             UPDATE trades 
             SET 
                 close_price = $1, 
@@ -191,12 +207,13 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
                 closed_reason = $4,
                 exit_amount = $5
             WHERE id = $6
+            RETURNING *
         `, [
             close_price, 
             finalProfitLoss, 
             tradeCloseTime,                    // NEW - editable time
             closed_reason || 'Closed by admin',
-            exit_amount || null,               // NEW
+            exit_amount || null,               // NEW - this is $5
             id
         ]);
         
@@ -207,21 +224,17 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
             WHERE id = $2
         `, [finalProfitLoss, trade.pool_id]);
         
+        console.log('✅ Trade closed with exit_amount:', result.rows[0].exit_amount);
+        console.log('✅ Trade closed with profit_loss:', result.rows[0].profit_loss);
+        
         res.json({ 
             success: true, 
             message: `Trade closed with ${finalProfitLoss >= 0 ? 'profit' : 'loss'} of $${Math.abs(finalProfitLoss).toLocaleString()}`,
             profit_loss: finalProfitLoss,
-            trade: {
-                ...trade,
-                close_price: close_price,
-                profit_loss: finalProfitLoss,
-                close_time: tradeCloseTime,
-                closed_reason: closed_reason || 'Closed by admin',
-                exit_amount: exit_amount || null
-            }
+            trade: result.rows[0]
         });
     } catch (error) {
-        console.error('Close trade error:', error);
+        console.error('❌ Close trade error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
