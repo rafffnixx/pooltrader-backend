@@ -50,7 +50,7 @@ router.get('/pool/:poolId/positions', authMiddleware, adminMiddleware, async (re
     }
 });
 
-// Add new trade - UPDATED with debug logs
+// Add new trade - UPDATED with proper volume handling
 router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
     console.log('📥 FULL REQUEST BODY:', JSON.stringify(req.body, null, 2));
     
@@ -58,20 +58,35 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
         pool_id, 
         symbol, 
         direction, 
-        volume, 
+        volume,        // Can be undefined/null
+        lot_size,      // Alternative field name
         open_price, 
         stop_loss, 
         take_profit, 
-        entry_amount,    // NEW - Entry amount in dollars
+        entry_amount, 
+        stake,         // Alternative field name
         notes,
-        open_time        // NEW - Editable open time
+        open_time
     } = req.body;
     
-    console.log('📥 entry_amount received:', entry_amount);
-    console.log('📥 entry_amount type:', typeof entry_amount);
+    // Handle volume - use provided volume, or lot_size, or default to 0
+    const finalVolume = volume !== undefined && volume !== null && volume !== '' 
+        ? parseFloat(volume) 
+        : lot_size !== undefined && lot_size !== null && lot_size !== ''
+        ? parseFloat(lot_size)
+        : 0;
+    
+    // Handle stake - use provided entry_amount, or stake, or default to null
+    const finalStake = entry_amount !== undefined && entry_amount !== null && entry_amount !== ''
+        ? parseFloat(entry_amount)
+        : stake !== undefined && stake !== null && stake !== ''
+        ? parseFloat(stake)
+        : null;
+    
+    console.log('📥 finalVolume:', finalVolume);
+    console.log('📥 finalStake:', finalStake);
     
     try {
-        // Use provided open_time or default to current timestamp
         const tradeOpenTime = open_time || new Date().toISOString();
         
         const result = await pool.query(`
@@ -83,9 +98,9 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
                 open_price, 
                 stop_loss, 
                 take_profit, 
-                entry_amount,    -- NEW
+                entry_amount,
                 notes, 
-                open_time,       -- NEW - editable time
+                open_time,
                 status
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open')
             RETURNING *
@@ -93,15 +108,16 @@ router.post('/trade', authMiddleware, adminMiddleware, async (req, res) => {
             pool_id, 
             symbol, 
             direction, 
-            volume, 
+            finalVolume,  // Now always a number (default 0)
             open_price, 
             stop_loss || null, 
             take_profit || null, 
-            entry_amount || null,  // NEW - note: this is $8
+            finalStake, 
             notes || null,
-            tradeOpenTime          // NEW - this is $10
+            tradeOpenTime
         ]);
         
+        console.log('✅ Trade created with volume:', result.rows[0].volume);
         console.log('✅ Trade created with entry_amount:', result.rows[0].entry_amount);
         console.log('✅ Trade ID:', result.rows[0].id);
         
@@ -130,13 +146,16 @@ router.put('/trade/:id/price', authMiddleware, adminMiddleware, async (req, res)
         const t = trade.rows[0];
         let currentPnL = 0;
         
+        // Use volume or default to 1 to avoid division by zero
+        const volume = parseFloat(t.volume) || 1;
+        
         if (t.direction === 'BUY') {
-            currentPnL = (current_price - parseFloat(t.open_price)) * parseFloat(t.volume);
+            currentPnL = (current_price - parseFloat(t.open_price)) * volume;
         } else {
-            currentPnL = (parseFloat(t.open_price) - current_price) * parseFloat(t.volume);
+            currentPnL = (parseFloat(t.open_price) - current_price) * volume;
         }
         
-        const pnlPercentage = (currentPnL / (parseFloat(t.open_price) * parseFloat(t.volume))) * 100;
+        const pnlPercentage = (currentPnL / (parseFloat(t.open_price) * volume)) * 100;
         
         await pool.query(`
             UPDATE trades 
@@ -156,7 +175,7 @@ router.put('/trade/:id/price', authMiddleware, adminMiddleware, async (req, res)
     }
 });
 
-// Close trade with profit/loss - UPDATED with debug logs
+// Close trade with profit/loss - UPDATED
 router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res) => {
     console.log('📥 CLOSE REQUEST BODY:', JSON.stringify(req.body, null, 2));
     
@@ -164,13 +183,10 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
     const { 
         close_price, 
         closed_reason,
-        exit_amount,     // NEW - Exit amount in dollars
-        profit_loss,     // NEW - Manual profit/loss
-        close_time       // NEW - Editable close time
+        exit_amount,
+        profit_loss,
+        close_time
     } = req.body;
-    
-    console.log('📥 exit_amount received:', exit_amount);
-    console.log('📥 profit_loss received:', profit_loss);
     
     try {
         const tradeResult = await pool.query('SELECT * FROM trades WHERE id = $1', [id]);
@@ -183,18 +199,17 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
         // Calculate profit/loss if not manually provided
         let finalProfitLoss = profit_loss;
         if (finalProfitLoss === undefined || finalProfitLoss === null || isNaN(finalProfitLoss)) {
-            // Auto-calculate if not provided
+            const volume = parseFloat(trade.volume) || 1;
             if (trade.direction === 'BUY') {
-                finalProfitLoss = (close_price - parseFloat(trade.open_price)) * parseFloat(trade.volume);
+                finalProfitLoss = (close_price - parseFloat(trade.open_price)) * volume;
             } else {
-                finalProfitLoss = (parseFloat(trade.open_price) - close_price) * parseFloat(trade.volume);
+                finalProfitLoss = (parseFloat(trade.open_price) - close_price) * volume;
             }
             console.log('📊 Auto-calculated profit_loss:', finalProfitLoss);
         } else {
             console.log('📊 Using manual profit_loss:', finalProfitLoss);
         }
         
-        // Use provided close_time or default to current timestamp
         const tradeCloseTime = close_time || new Date().toISOString();
         
         const result = await pool.query(`
@@ -211,13 +226,12 @@ router.post('/trade/:id/close', authMiddleware, adminMiddleware, async (req, res
         `, [
             close_price, 
             finalProfitLoss, 
-            tradeCloseTime,                    // NEW - editable time
+            tradeCloseTime,
             closed_reason || 'Closed by admin',
-            exit_amount || null,               // NEW - this is $5
+            exit_amount || null,
             id
         ]);
         
-        // Update pool total profit/loss
         await pool.query(`
             UPDATE pools 
             SET total_profit_loss = COALESCE(total_profit_loss, 0) + $1
